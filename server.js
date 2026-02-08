@@ -384,13 +384,17 @@ async function seedDatabase() {
 }
 
 // Database Connection
-const MONGO_URI = 'mongodb://localhost:27017/icolleague_db';
-mongoose.connect(MONGO_URI)
-    .then(async () => {
-        console.log('MongoDB Connected');
-        await seedDatabase();
-    })
-    .catch(err => console.error('DB Connection Error:', err));
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI) {
+    console.error('DB Connection Error: MONGO_URI is not set');
+} else {
+    mongoose.connect(MONGO_URI)
+        .then(async () => {
+            console.log('MongoDB Connected');
+            await seedDatabase();
+        })
+        .catch(err => console.error('DB Connection Error:', err));
+}
 
 /**
  * Exponential Backoff for API calls (MANDATORY per requirements)
