@@ -1,0 +1,14 @@
+{
+  "name": "icolleague-assistant",
+  "version": "1.0.0",
+  "description": "Virtual Employee Assistant for Internal Processes",
+  "main": "server.js",
+  "dependencies": {
+    "dotenv": "^17.2.4",
+    "express": "^4.18.2",
+    "mongoose": "^7.0.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
