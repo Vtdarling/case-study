@@ -1,7 +1,14 @@
 const mongoose = require('mongoose');
+const path = require('path');
+const fs = require('fs');
 const Faq = require('./models/Faq');
 
-const MONGO_URI = 'mongodb://localhost:27017/icolleague_db';
+require('dotenv').config();
+if (!process.env.MONGO_URI && fs.existsSync(path.join(__dirname, 'env.gitignore'))) {
+  require('dotenv').config({ path: path.join(__dirname, 'env.gitignore') });
+}
+
+const MONGO_URI = process.env.MONGO_URI;
 
 const expandedPolicies = [
   // --- HR CATEGORY ---
@@ -93,6 +100,10 @@ const expandedPolicies = [
 
 async function seed() {
   try {
+    if (!MONGO_URI) {
+      throw new Error('MONGO_URI is not set. Add it to .env or env.gitignore.');
+    }
+
     await mongoose.connect(MONGO_URI);
     console.log("Connected to MongoDB...");
     

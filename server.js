@@ -1,15 +1,23 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const path = require('path');
+const fs = require('fs');
 const Faq = require('./models/Faq');
 
 require('dotenv').config();
+if (!process.env.MONGO_URI && fs.existsSync(path.join(__dirname, 'env.gitignore'))) {
+    require('dotenv').config({ path: path.join(__dirname, 'env.gitignore') });
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // The environment provides the key at runtime
-const apiKey = process.env.GEMINI_API_KEY || "";
+const apiKey = process.env.OPENROUTER_API_KEY || "";
+const OPENROUTER_MODELS = (process.env.OPENROUTER_MODELS || 'openai/gpt-4o-mini,google/gemini-2.0-flash-001')
+    .split(',')
+    .map(model => model.trim())
+    .filter(Boolean);
 
 // Middleware
 app.use(express.json());
@@ -50,6 +58,12 @@ const FAQ_SEED = [
         question: "What are the office timings and leave policies?",
         keywords: ["office", "timings", "leave", "policy", "hours"],
         answer: "Office hours and leave policies are in the HR portal and your offer letter. Check with HR for updates.",
+        category: "Basic"
+    },
+    {
+        question: "How many leave days can I take in a month?",
+        keywords: ["leave", "month", "monthly", "days", "take", "limit", "many"],
+        answer: "You can take up to 7 leave days in a month.",
         category: "Basic"
     },
     {
@@ -364,6 +378,14 @@ function buildSearchTerms(message) {
     return Array.from(expanded);
 }
 
+function buildLocalAnswer(message, relevantDocs) {
+    if (relevantDocs.length > 0) {
+        return `${relevantDocs[0].answer} (Based on internal FAQ data.)`;
+    }
+
+    return "I could not find an exact match in the internal FAQ right now. Please verify with HR or IT for the latest policy details.";
+}
+
 async function seedDatabase() {
     try {
         const ops = FAQ_SEED.map((faq) => ({
@@ -401,17 +423,47 @@ if (!MONGO_URI) {
  */
 async function fetchWithRetry(url, options, retries = 5, backoff = 1000) {
     try {
-        if (!apiKey) {
-            throw new Error('Missing GEMINI_API_KEY');
-        }
         const response = await fetch(url, options);
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        if (!response.ok) {
+            const errorBody = await response.text();
+            const error = new Error(`HTTP error! status: ${response.status}${errorBody ? ` body: ${errorBody.slice(0, 250)}` : ''}`);
+            error.status = response.status;
+            throw error;
+        }
         return await response.json();
     } catch (error) {
         if (retries <= 0) throw error;
         await new Promise(resolve => setTimeout(resolve, backoff));
         return fetchWithRetry(url, options, retries - 1, backoff * 2);
     }
+}
+
+async function generateWithOpenRouterFallback(messages) {
+    let lastError;
+
+    for (const model of OPENROUTER_MODELS) {
+        try {
+            return await fetchWithRetry('https://openrouter.ai/api/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${apiKey}`,
+                    'HTTP-Referer': `http://localhost:${PORT}`,
+                    'X-Title': 'iColleague Assistant'
+                },
+                body: JSON.stringify({ model, messages })
+            });
+        } catch (error) {
+            lastError = error;
+            if (error.status === 400 || error.status === 404) {
+                console.warn(`OpenRouter model unavailable: ${model}. Trying next fallback model...`);
+                continue;
+            }
+            throw error;
+        }
+    }
+
+    throw lastError || new Error('No OpenRouter model is configured.');
 }
 
 /**
@@ -421,17 +473,25 @@ app.post('/api/chat', async (req, res) => {
     const { message } = req.body;
 
     try {
+        if (!message || typeof message !== 'string') {
+            return res.status(400).json({ answer: 'Please enter a valid question.' });
+        }
+
         // 1. SEARCH: Find relevant documents in MongoDB (Simple Keyword Search)
         // This acts as the "Truth" for the LLM
         const searchTerms = buildSearchTerms(message);
         const relevantDocs = await Faq.find({ keywords: { $in: searchTerms } }).limit(3);
+
+        if (!apiKey) {
+            return res.json({ answer: buildLocalAnswer(message, relevantDocs) });
+        }
         
-        // 2. CONTEXT: Format the data for Gemini
+        // 2. CONTEXT: Format the data for the language model
         const context = relevantDocs.length > 0 
             ? relevantDocs.map(d => `Topic: ${d.question}\nAnswer: ${d.answer}`).join('\n\n')
             : "No specific internal document found for this query.";
 
-        // 3. GENERATE: Call Gemini to create a dynamic response
+        // 3. GENERATE: Call OpenRouter to create a dynamic response
         const systemPrompt = `
             You are 'iColleague', a helpful and professional Virtual Assistant for our company.
             Your personality: Dynamic, polite, and efficient.
@@ -447,21 +507,20 @@ app.post('/api/chat', async (req, res) => {
             - Keep responses short and clear (1-3 sentences).
         `;
 
-        const payload = {
-            contents: [{ parts: [{ text: message }] }],
-            systemInstruction: { parts: [{ text: systemPrompt }] }
-        };
+        const messages = [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: message }
+        ];
 
-        const result = await fetchWithRetry(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            }
-        );
+        let result;
+        try {
+            result = await generateWithOpenRouterFallback(messages);
+        } catch (apiError) {
+            console.error('OpenRouter API Error:', apiError.message || apiError);
+            return res.json({ answer: buildLocalAnswer(message, relevantDocs) });
+        }
 
-        const aiText = result.candidates?.[0]?.content?.parts?.[0]?.text || "I'm sorry, I'm having trouble thinking right now.";
+        const aiText = result.choices?.[0]?.message?.content || "I'm sorry, I'm having trouble thinking right now.";
 
         res.json({ answer: aiText });
 
